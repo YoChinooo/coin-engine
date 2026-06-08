@@ -1,0 +1,16 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+alembic
+httpx
+pandas
+numpy
+scikit-learn
+ta
+pydantic
+pydantic-settings
+python-dotenv
+aiohttp
+feedparser
+textblob
+apscheduler
