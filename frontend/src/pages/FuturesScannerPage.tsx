@@ -1704,9 +1704,11 @@ export function FuturesScannerPage() {
   const [analysisUpdatedAt, setAnalysisUpdatedAt] = useState<Date | null>(null);
   const [analysisCountdown, setAnalysisCountdown] = useState(0);
   const [silentRefreshing, setSilentRefreshing] = useState(false);
-  const autoRefreshRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const autoTickRef   = useRef<ReturnType<typeof setInterval> | null>(null);
-  const currentSymRef = useRef<string>("");
+  // Use refs for everything the interval touches — avoids stale closure entirely
+  const autoRefreshRef   = useRef<ReturnType<typeof setInterval> | null>(null);
+  const autoTickRef      = useRef<ReturnType<typeof setInterval> | null>(null);
+  const isRefreshingRef  = useRef(false);         // non-stale guard
+  const activeSymRef     = useRef({ sym: "", type: "futures" as AssetType, ctx: "" });
 
   // Favorites
   const [favorites, setFavorites] = useState<string[]>(loadFavorites);
@@ -1770,11 +1772,13 @@ export function FuturesScannerPage() {
     reader.readAsDataURL(file);
   }, []);
 
-  const ANALYSIS_REFRESH_MS = 60_000; // re-run full analysis every 60s
+  const ANALYSIS_REFRESH_MS = 60_000;
 
-  // Silent background re-analysis — updates numbers without clearing the UI
-  const silentRefresh = useCallback(async (sym: string, type: AssetType, ctx: string) => {
-    if (!sym || silentRefreshing) return;
+  // Ref-based silent refresh — no stale closure issues
+  const doSilentRefresh = useCallback(async () => {
+    const { sym, type, ctx } = activeSymRef.current;
+    if (!sym || isRefreshingRef.current) return;
+    isRefreshingRef.current = true;
     setSilentRefreshing(true);
     try {
       const [realQuote, candles] = await Promise.all([
@@ -1788,20 +1792,18 @@ export function FuturesScannerPage() {
       setAnalysisUpdatedAt(new Date());
       setAnalysisCountdown(ANALYSIS_REFRESH_MS / 1000);
     } catch { /* keep existing data on failure */ }
-    finally { setSilentRefreshing(false); }
-  }, [silentRefreshing]);
+    finally { isRefreshingRef.current = false; setSilentRefreshing(false); }
+  }, []); // no deps — reads everything from refs
 
-  // Start auto-refresh loop whenever a symbol is actively loaded
   const startAutoRefresh = useCallback((sym: string, type: AssetType, ctx: string) => {
+    activeSymRef.current = { sym, type, ctx };
     if (autoRefreshRef.current) clearInterval(autoRefreshRef.current);
     if (autoTickRef.current)   clearInterval(autoTickRef.current);
-    currentSymRef.current = sym;
     setAnalysisCountdown(ANALYSIS_REFRESH_MS / 1000);
-    autoRefreshRef.current = setInterval(() => {
-      if (currentSymRef.current === sym) silentRefresh(sym, type, ctx);
-    }, ANALYSIS_REFRESH_MS);
-    autoTickRef.current = setInterval(() => setAnalysisCountdown(c => Math.max(0, c - 1)), 1000);
-  }, [silentRefresh]);
+    // Interval just calls doSilentRefresh — which reads current refs, never stale
+    autoRefreshRef.current = setInterval(doSilentRefresh, ANALYSIS_REFRESH_MS);
+    autoTickRef.current    = setInterval(() => setAnalysisCountdown(c => Math.max(0, c - 1)), 1000);
+  }, [doSilentRefresh]);
 
   // Cleanup on unmount
   useEffect(() => () => {
@@ -2044,7 +2046,7 @@ export function FuturesScannerPage() {
               <RefreshCw size={11} className={silentRefreshing ? "animate-spin text-blue-400" : ""} />
               <span>Next in <span className="font-mono text-slate-300">{analysisCountdown}s</span></span>
               <button
-                onClick={() => silentRefresh(symbol.trim().toUpperCase(), assetType, userContext)}
+                onClick={doSilentRefresh}
                 disabled={silentRefreshing}
                 className="ml-1 px-2 py-0.5 bg-dark-700 hover:bg-dark-600 rounded text-slate-400 hover:text-white transition-colors disabled:opacity-40"
               >

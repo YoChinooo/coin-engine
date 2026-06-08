@@ -302,8 +302,11 @@ export async function fetchQuote(symbol: string, assetType?: "futures" | "stock"
   const meta = data.chart.result[0].meta;
 
   const price = meta.regularMarketPrice ?? meta.previousClose ?? 0;
-  const prev  = meta.previousClose ?? price;
-  const chg   = price - prev;
+  const prev  = meta.chartPreviousClose ?? meta.previousClose ?? price;
+  // Prefer Yahoo's own pre-calculated changePct — avoids prev=price edge case
+  const changePctRaw = meta.regularMarketChangePercent
+    ?? (prev !== 0 ? ((price - prev) / prev) * 100 : 0);
+  const chg = meta.regularMarketChange ?? (price - prev);
 
   const q: Quote = {
     symbol: meta.symbol ?? ticker,
@@ -314,7 +317,7 @@ export async function fetchQuote(symbol: string, assetType?: "futures" | "stock"
     low:        meta.regularMarketDayLow  ?? price,
     prevClose:  prev,
     change:     chg,
-    changePct:  prev !== 0 ? (chg / prev) * 100 : 0,
+    changePct:  changePctRaw,
     volume:     meta.regularMarketVolume ?? 0,
     currency:   meta.currency ?? "USD",
     exchange:   meta.exchangeName ?? "",
