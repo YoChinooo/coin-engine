@@ -312,6 +312,46 @@ export async function fetchEarlyCandidates(forceRefresh = false): Promise<EarlyC
   return result;
 }
 
+// ─── Penny Scanner bridge ─────────────────────────────────────────────────────
+// Converts a high-scoring PennyCoin into an EarlyCandidate so it can appear
+// in the Early Action dropdown alongside meme/trending coins.
+
+import type { PennyCoin } from "../types";
+
+export function pennyToEarlyCandidate(coin: PennyCoin): EarlyCandidate {
+  const volRatio = coin.market_cap > 0 ? coin.total_volume / coin.market_cap : 0;
+  const volumeSurge =
+    volRatio > 3.0 ? 25 : volRatio > 2.0 ? 22 : volRatio > 1.0 ? 19 :
+    volRatio > 0.5 ? 15 : volRatio > 0.2 ? 10 : 4;
+
+  return {
+    id:           coin.id,
+    symbol:       coin.symbol.toUpperCase(),
+    name:         coin.name,
+    image:        coin.image,
+    price:        coin.current_price,
+    change1h:     0,   // PennyCoin doesn't carry 1h — treated as neutral
+    change24h:    coin.price_change_percentage_24h,
+    change7d:     0,
+    volume24h:    coin.total_volume,
+    marketCap:    coin.market_cap,
+    athChangePct: 0,
+    trendingRank: 0,
+    earlyScore:   coin.earlyScore,
+    scoreBreakdown: {
+      volumeSurge,
+      priceMomentum: coin.earlyScore - volumeSurge,
+      trendingBonus: 0,
+      marketCapTier: 0,
+      athDistance:   0,
+    },
+    isMeme:    coin.sector === "Meme",
+    isGainer:  coin.price_change_percentage_24h > 5,
+    category:  `Penny/${coin.sector}`,
+    fetchedAt: new Date(),
+  };
+}
+
 // ─── Formatting helpers ───────────────────────────────────────────────────────
 
 export function fmtMcap(n: number): string {

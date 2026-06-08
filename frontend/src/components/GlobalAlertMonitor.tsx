@@ -18,7 +18,8 @@ import {
   loadNotifyConfig, sendPhoneAlert, sendEarlyAlert, loadAlertsEnabled,
 } from "../services/phoneNotify";
 import type { TradeAlert } from "../services/phoneNotify";
-import { fetchEarlyCandidates } from "../services/earlyCrypto";
+import { fetchEarlyCandidates, pennyToEarlyCandidate } from "../services/earlyCrypto";
+import { fetchPennyCoins } from "../services/coingecko";
 
 const FAV_KEY   = "coinEngine_favFutures";
 const ALERT_KEY = "coinEngine_alerts";
@@ -190,7 +191,26 @@ export function GlobalAlertMonitor() {
 
     try {
       // forceRefresh=true: always fetch fresh data, never use 3-min cache for alerts
-      const candidates = await fetchEarlyCandidates(true);
+      const [earlyCandidates, pennyCoins] = await Promise.allSettled([
+        fetchEarlyCandidates(true),
+        fetchPennyCoins(),
+      ]);
+
+      // Merge penny scanner high-scorers into early candidates
+      const base = earlyCandidates.status === "fulfilled" ? earlyCandidates.value : [];
+      const pennyExtra = pennyCoins.status === "fulfilled"
+        ? pennyCoins.value
+            .filter(c => c.earlyScore >= (cfg.earlyScoreThreshold ?? 80))
+            .map(pennyToEarlyCandidate)
+        : [];
+
+      // Dedupe: penny coin wins if same id already exists with lower score
+      const merged = new Map(base.map(c => [c.id, c]));
+      for (const c of pennyExtra) {
+        const ex = merged.get(c.id);
+        if (!ex || c.earlyScore > ex.earlyScore) merged.set(c.id, c);
+      }
+      const candidates = [...merged.values()].sort((a, b) => b.earlyScore - a.earlyScore);
 
       for (const coin of candidates) {
         if (abortRef.current) break;
