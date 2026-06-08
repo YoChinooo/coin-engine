@@ -298,49 +298,52 @@ export async function fetchQuote(symbol: string, assetType?: "futures" | "stock"
   const cached = cGet<Quote>(key, QUOTE_TTL);
   if (cached) return cached;
 
-  // Use 2-day 1h bars — gives us yesterday's close AND today's live price
-  // More reliable than 1d/5d meta fields which can return prev=current for futures
-  const data = await yahooFetchWithFallback(`/v8/finance/chart/__TICKER__?interval=60m&range=2d`, symbol, assetType);
+  // Fetch 5 daily bars. During the trading day, today's bar has close=null
+  // (incomplete), so the last non-null close is always the previous session.
+  // This works for 24hr futures (NQ, ES, CL, GC) unlike timestamp-based approaches.
+  const data = await yahooFetchWithFallback(`/v8/finance/chart/__TICKER__?interval=1d&range=5d`, symbol, assetType);
   const result = data.chart.result[0];
   const meta   = result.meta;
 
-  const price = meta.regularMarketPrice ?? meta.previousClose ?? 0;
+  const price = meta.regularMarketPrice ?? 0;
 
-  // Pull previous close from candle data: last close of the session before today
-  let prevClose = meta.chartPreviousClose ?? meta.previousClose ?? 0;
+  // Previous close: last daily candle close that is NOT null
+  // Today's intraday bar has close=null until market closes, so this is always yesterday
+  let prevClose = 0;
   try {
-    const timestamps: number[] = result.timestamp ?? [];
-    const closes: number[] = result.indicators?.quote?.[0]?.close ?? [];
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
-    const todayStartTs = todayStart.getTime() / 1000;
-    // Find last candle from BEFORE today
-    let lastYesterdayClose = 0;
-    for (let i = 0; i < timestamps.length; i++) {
-      if (timestamps[i] < todayStartTs && isFinite(closes[i]) && closes[i] > 0) {
-        lastYesterdayClose = closes[i];
+    const closes: (number | null)[] = result.indicators?.quote?.[0]?.close ?? [];
+    // Walk backwards, skip null/zero, skip a value that equals current price exactly
+    for (let i = closes.length - 1; i >= 0; i--) {
+      const c = closes[i];
+      if (c && isFinite(c) && c > 0 && Math.abs(c - price) > 0.01) {
+        prevClose = c;
+        break;
       }
     }
-    if (lastYesterdayClose > 0) prevClose = lastYesterdayClose;
-  } catch { /* fallback to meta value */ }
+  } catch { /**/ }
 
-  const chg        = price - prevClose;
-  const changePct  = prevClose > 0 ? (chg / prevClose) * 100 : 0;
+  // Final fallback chain
+  if (!prevClose || prevClose === price) {
+    prevClose = meta.chartPreviousClose ?? meta.previousClose ?? price;
+  }
+
+  const chg       = price - prevClose;
+  const changePct = prevClose > 0 && prevClose !== price ? (chg / prevClose) * 100 : 0;
 
   const q: Quote = {
     symbol:      meta.symbol ?? ticker,
     name:        meta.longName ?? meta.shortName ?? ticker,
     price,
-    open:        meta.regularMarketOpen      ?? price,
-    high:        meta.regularMarketDayHigh   ?? price,
-    low:         meta.regularMarketDayLow    ?? price,
+    open:        meta.regularMarketOpen    ?? price,
+    high:        meta.regularMarketDayHigh ?? price,
+    low:         meta.regularMarketDayLow  ?? price,
     prevClose,
     change:      chg,
     changePct,
-    volume:      meta.regularMarketVolume    ?? 0,
-    currency:    meta.currency               ?? "USD",
-    exchange:    meta.exchangeName           ?? "",
-    marketState: meta.marketState            ?? "REGULAR",
+    volume:      meta.regularMarketVolume  ?? 0,
+    currency:    meta.currency             ?? "USD",
+    exchange:    meta.exchangeName         ?? "",
+    marketState: meta.marketState          ?? "REGULAR",
   };
   cSet(key, q);
   return q;
