@@ -1,0 +1,17 @@
+{
+  "name": "coin-engine-alert-scanner",
+  "version": "1.0.0",
+  "description": "Always-on market scanner — sends phone alerts via ntfy / Telegram",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
