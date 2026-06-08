@@ -298,30 +298,49 @@ export async function fetchQuote(symbol: string, assetType?: "futures" | "stock"
   const cached = cGet<Quote>(key, QUOTE_TTL);
   if (cached) return cached;
 
-  const data = await yahooFetchWithFallback(`/v8/finance/chart/__TICKER__?interval=1d&range=5d`, symbol, assetType);
-  const meta = data.chart.result[0].meta;
+  // Use 2-day 1h bars — gives us yesterday's close AND today's live price
+  // More reliable than 1d/5d meta fields which can return prev=current for futures
+  const data = await yahooFetchWithFallback(`/v8/finance/chart/__TICKER__?interval=60m&range=2d`, symbol, assetType);
+  const result = data.chart.result[0];
+  const meta   = result.meta;
 
   const price = meta.regularMarketPrice ?? meta.previousClose ?? 0;
-  const prev  = meta.chartPreviousClose ?? meta.previousClose ?? price;
-  // Prefer Yahoo's own pre-calculated changePct — avoids prev=price edge case
-  const changePctRaw = meta.regularMarketChangePercent
-    ?? (prev !== 0 ? ((price - prev) / prev) * 100 : 0);
-  const chg = meta.regularMarketChange ?? (price - prev);
+
+  // Pull previous close from candle data: last close of the session before today
+  let prevClose = meta.chartPreviousClose ?? meta.previousClose ?? 0;
+  try {
+    const timestamps: number[] = result.timestamp ?? [];
+    const closes: number[] = result.indicators?.quote?.[0]?.close ?? [];
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const todayStartTs = todayStart.getTime() / 1000;
+    // Find last candle from BEFORE today
+    let lastYesterdayClose = 0;
+    for (let i = 0; i < timestamps.length; i++) {
+      if (timestamps[i] < todayStartTs && isFinite(closes[i]) && closes[i] > 0) {
+        lastYesterdayClose = closes[i];
+      }
+    }
+    if (lastYesterdayClose > 0) prevClose = lastYesterdayClose;
+  } catch { /* fallback to meta value */ }
+
+  const chg        = price - prevClose;
+  const changePct  = prevClose > 0 ? (chg / prevClose) * 100 : 0;
 
   const q: Quote = {
-    symbol: meta.symbol ?? ticker,
-    name: meta.longName ?? meta.shortName ?? ticker,
+    symbol:      meta.symbol ?? ticker,
+    name:        meta.longName ?? meta.shortName ?? ticker,
     price,
-    open:       meta.regularMarketOpen ?? price,
-    high:       meta.regularMarketDayHigh ?? price,
-    low:        meta.regularMarketDayLow  ?? price,
-    prevClose:  prev,
-    change:     chg,
-    changePct:  changePctRaw,
-    volume:     meta.regularMarketVolume ?? 0,
-    currency:   meta.currency ?? "USD",
-    exchange:   meta.exchangeName ?? "",
-    marketState: meta.marketState ?? "REGULAR",
+    open:        meta.regularMarketOpen      ?? price,
+    high:        meta.regularMarketDayHigh   ?? price,
+    low:         meta.regularMarketDayLow    ?? price,
+    prevClose,
+    change:      chg,
+    changePct,
+    volume:      meta.regularMarketVolume    ?? 0,
+    currency:    meta.currency               ?? "USD",
+    exchange:    meta.exchangeName           ?? "",
+    marketState: meta.marketState            ?? "REGULAR",
   };
   cSet(key, q);
   return q;
