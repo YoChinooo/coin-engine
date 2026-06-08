@@ -1701,6 +1701,12 @@ export function FuturesScannerPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedDir, setSelectedDir] = useState<Direction>("LONG");
+  const [analysisUpdatedAt, setAnalysisUpdatedAt] = useState<Date | null>(null);
+  const [analysisCountdown, setAnalysisCountdown] = useState(0);
+  const [silentRefreshing, setSilentRefreshing] = useState(false);
+  const autoRefreshRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const autoTickRef   = useRef<ReturnType<typeof setInterval> | null>(null);
+  const currentSymRef = useRef<string>("");
 
   // Favorites
   const [favorites, setFavorites] = useState<string[]>(loadFavorites);
@@ -1764,6 +1770,45 @@ export function FuturesScannerPage() {
     reader.readAsDataURL(file);
   }, []);
 
+  const ANALYSIS_REFRESH_MS = 60_000; // re-run full analysis every 60s
+
+  // Silent background re-analysis — updates numbers without clearing the UI
+  const silentRefresh = useCallback(async (sym: string, type: AssetType, ctx: string) => {
+    if (!sym || silentRefreshing) return;
+    setSilentRefreshing(true);
+    try {
+      const [realQuote, candles] = await Promise.all([
+        fetchQuote(sym, type),
+        fetchCandles(sym, "5m", type),
+      ]);
+      const indicators = computeIndicators(candles);
+      const result = await buildAnalysis(sym, type, realQuote, indicators, ctx);
+      setQuote(realQuote);
+      setAnalysis(result);
+      setAnalysisUpdatedAt(new Date());
+      setAnalysisCountdown(ANALYSIS_REFRESH_MS / 1000);
+    } catch { /* keep existing data on failure */ }
+    finally { setSilentRefreshing(false); }
+  }, [silentRefreshing]);
+
+  // Start auto-refresh loop whenever a symbol is actively loaded
+  const startAutoRefresh = useCallback((sym: string, type: AssetType, ctx: string) => {
+    if (autoRefreshRef.current) clearInterval(autoRefreshRef.current);
+    if (autoTickRef.current)   clearInterval(autoTickRef.current);
+    currentSymRef.current = sym;
+    setAnalysisCountdown(ANALYSIS_REFRESH_MS / 1000);
+    autoRefreshRef.current = setInterval(() => {
+      if (currentSymRef.current === sym) silentRefresh(sym, type, ctx);
+    }, ANALYSIS_REFRESH_MS);
+    autoTickRef.current = setInterval(() => setAnalysisCountdown(c => Math.max(0, c - 1)), 1000);
+  }, [silentRefresh]);
+
+  // Cleanup on unmount
+  useEffect(() => () => {
+    if (autoRefreshRef.current) clearInterval(autoRefreshRef.current);
+    if (autoTickRef.current)   clearInterval(autoTickRef.current);
+  }, []);
+
   const handleAnalyze = useCallback(async () => {
     const sym = symbol.trim().toUpperCase();
     if (!sym) { setError("Enter a symbol first (e.g. ES, NQ, AAPL, BTC)"); return; }
@@ -1775,10 +1820,12 @@ export function FuturesScannerPage() {
       setQuote(realQuote);
       setAnalysis(result);
       setSelectedDir(result.direction === "NEUTRAL" ? "LONG" : result.direction);
+      setAnalysisUpdatedAt(new Date());
+      startAutoRefresh(sym, assetType, userContext);
     } catch {
       setError(`Could not fetch data for "${symbol}". Check the symbol or try again — market may be closed.`);
     } finally { setLoading(false); }
-  }, [symbol, assetType, userContext]);
+  }, [symbol, assetType, userContext, startAutoRefresh]);
 
   const handleQuoteUpdate = useCallback((q: Quote) => setQuote(q), []);
   const unseenCount = alerts.filter(a => !a.seen).length;
@@ -1803,11 +1850,13 @@ export function FuturesScannerPage() {
         setQuote(realQuote);
         setAnalysis(result);
         setSelectedDir(result.direction === "NEUTRAL" ? "LONG" : result.direction);
+        setAnalysisUpdatedAt(new Date());
+        startAutoRefresh(sym, type, "");
       } catch {
         setError(`Could not fetch data for "${sym}".`);
       } finally { setLoading(false); }
     }, 50);
-  }, []);
+  }, [startAutoRefresh]);
 
   return (
     <div className="flex gap-0 min-h-screen">
@@ -1982,6 +2031,28 @@ export function FuturesScannerPage() {
 
       {analysis && quote && !loading && (
         <div className="space-y-6">
+          {/* Live update status bar */}
+          <div className="flex items-center gap-3 px-3 py-2 bg-dark-800 border border-dark-600 rounded-lg text-xs">
+            <div className="flex items-center gap-1.5">
+              <span className={`w-1.5 h-1.5 rounded-full ${silentRefreshing ? "bg-blue-400 animate-pulse" : "bg-emerald-400 animate-pulse"}`} />
+              <span className="text-slate-400">{silentRefreshing ? "Updating analysis…" : "Live — auto-refreshes every 60s"}</span>
+            </div>
+            {analysisUpdatedAt && (
+              <span className="text-slate-600">Last updated: {analysisUpdatedAt.toLocaleTimeString()}</span>
+            )}
+            <div className="ml-auto flex items-center gap-2 text-slate-500">
+              <RefreshCw size={11} className={silentRefreshing ? "animate-spin text-blue-400" : ""} />
+              <span>Next in <span className="font-mono text-slate-300">{analysisCountdown}s</span></span>
+              <button
+                onClick={() => silentRefresh(symbol.trim().toUpperCase(), assetType, userContext)}
+                disabled={silentRefreshing}
+                className="ml-1 px-2 py-0.5 bg-dark-700 hover:bg-dark-600 rounded text-slate-400 hover:text-white transition-colors disabled:opacity-40"
+              >
+                Refresh now
+              </button>
+            </div>
+          </div>
+
           {/* Summary */}
           <div className={`border rounded-xl p-5 ${dirBg}`}>
             <div className="flex flex-wrap items-start gap-6">
