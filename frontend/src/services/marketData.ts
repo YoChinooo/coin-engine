@@ -127,35 +127,47 @@ function cSet(key: string, data: unknown) {
   cache.set(key, { data, ts: Date.now() });
 }
 
-// ─── HTTP fetch with CORS proxy fallback ──────────────────────────────────────
+// ─── HTTP fetch — Vercel serverless proxy (no CORS) ──────────────────────────
 
-// Multiple Yahoo Finance hosts — v8 is the primary, v7 sometimes works when v8 is rate-limited
-const YAHOO_HOSTS = [
-  "https://query1.finance.yahoo.com",
-  "https://query2.finance.yahoo.com",
-];
-
-const PROXIES = [
-  "",                                           // direct (works on Vercel edge/server)
-  "https://corsproxy.io/?",                     // popular CORS proxy
-  "https://api.allorigins.win/raw?url=",        // allorigins fallback
-  "https://proxy.cors.sh/",                     // cors.sh
-];
+// Our own /api/yahoo serverless function runs on Vercel's servers where
+// there are no browser CORS restrictions. This is the primary path.
+// Falls back to direct + third-party proxies if running locally.
 
 async function yahooFetch(path: string): Promise<any> {
-  const urls = YAHOO_HOSTS.map(h => `${h}${path}`);
-  for (const url of urls) {
-    for (const proxy of PROXIES) {
+  // 1. Try our own Vercel serverless proxy first (always works in production)
+  try {
+    const { data } = await axios.get(`/api/yahoo?path=${encodeURIComponent(path)}`, {
+      timeout: 15_000,
+    });
+    if (data?.chart?.result?.[0]) return data;
+  } catch { /* fall through to direct/proxy attempts */ }
+
+  // 2. Fallback: direct requests (works in dev / non-browser envs)
+  const YAHOO_HOSTS = [
+    "https://query1.finance.yahoo.com",
+    "https://query2.finance.yahoo.com",
+  ];
+  const FALLBACK_PROXIES = [
+    "",                                             // direct (no proxy)
+    "https://api.allorigins.win/raw?url=",          // allorigins
+    "https://thingproxy.freeboard.io/fetch/",       // thingproxy
+    "https://corsproxy.io/?",                       // corsproxy (sometimes 403s)
+  ];
+
+  for (const host of YAHOO_HOSTS) {
+    const url = `${host}${path}`;
+    for (const proxy of FALLBACK_PROXIES) {
       try {
         const fullUrl = proxy ? `${proxy}${encodeURIComponent(url)}` : url;
         const { data } = await axios.get(fullUrl, {
           timeout: 12_000,
-          headers: proxy ? {} : { "Accept": "application/json", "User-Agent": "Mozilla/5.0" },
+          headers: proxy ? {} : { "Accept": "application/json" },
         });
         if (data?.chart?.result?.[0]) return data;
       } catch { /* try next */ }
     }
   }
+
   throw new Error(`Yahoo Finance unavailable — try again in a few seconds`);
 }
 
