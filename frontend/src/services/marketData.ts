@@ -137,20 +137,33 @@ function cSet(key: string, data: unknown) {
 // No serverless function needed — pure edge rewrite.
 
 async function yahooFetch(path: string): Promise<any> {
-  // Primary: Vercel rewrite → query1
-  try {
-    const { data } = await axios.get(`/yf${path}`, { timeout: 15_000 });
-    if (data?.chart?.result?.[0]) return data;
-  } catch { /* try query2 */ }
+  const isLocal = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
 
-  // Secondary: Vercel rewrite → query2
-  try {
-    const { data } = await axios.get(`/yf2${path}`, { timeout: 15_000 });
-    if (data?.chart?.result?.[0]) return data;
-  } catch { /* fall through */ }
+  // Primary: serverless function (/api/yahoo) — sets proper User-Agent/Referer headers
+  if (!isLocal) {
+    try {
+      const { data } = await axios.get(`/api/yahoo`, {
+        params: { path },
+        timeout: 15_000,
+      });
+      if (data?.chart?.result?.[0]) return data;
+    } catch { /* fall through to rewrite */ }
 
-  // Local dev fallback (rewrites don't exist locally)
-  if (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") {
+    // Secondary: Vercel edge rewrite → query1 (no custom headers but faster)
+    try {
+      const { data } = await axios.get(`/yf${path}`, { timeout: 15_000 });
+      if (data?.chart?.result?.[0]) return data;
+    } catch { /* fall through */ }
+
+    // Tertiary: Vercel edge rewrite → query2
+    try {
+      const { data } = await axios.get(`/yf2${path}`, { timeout: 15_000 });
+      if (data?.chart?.result?.[0]) return data;
+    } catch { /* fall through */ }
+  }
+
+  // Local dev fallback (no proxy needed — CORS not blocked by browser for localhost)
+  if (isLocal) {
     for (const host of ["https://query1.finance.yahoo.com", "https://query2.finance.yahoo.com"]) {
       try {
         const { data } = await axios.get(`${host}${path}`, { timeout: 12_000 });

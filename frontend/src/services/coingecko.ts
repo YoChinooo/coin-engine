@@ -1,7 +1,14 @@
 import axios from "axios";
 import type { PennyCoin, MemeAnalysis, Signal } from "../types";
 
-const cg = axios.create({ baseURL: "https://api.coingecko.com/api/v3", timeout: 15000 });
+// Route through /cg/ Vercel rewrite in production (avoids CORS).
+// On localhost the rewrite doesn't exist so fall back to direct URL.
+const isLocal = typeof window !== "undefined" &&
+  (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
+const cg = axios.create({
+  baseURL: isLocal ? "https://api.coingecko.com/api/v3" : "/cg",
+  timeout: 15000,
+});
 
 // ─── Cache ───────────────────────────────────────────────────────────────────
 
