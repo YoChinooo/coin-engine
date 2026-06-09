@@ -127,42 +127,33 @@ function cSet(key: string, data: unknown) {
   cache.set(key, { data, ts: Date.now() });
 }
 
-// ─── HTTP fetch — Vercel serverless proxy (no CORS) ──────────────────────────
-
-// Our own /api/yahoo serverless function runs on Vercel's servers where
-// there are no browser CORS restrictions. This is the primary path.
-// Falls back to direct + third-party proxies if running locally.
+// ─── HTTP fetch via Vercel reverse-proxy rewrites (zero CORS issues) ─────────
+//
+// Vercel rewrites proxy the request server-side:
+//   /yf/v8/finance/chart/NQ%3DF?interval=60m&range=2d
+//   → https://query1.finance.yahoo.com/v8/finance/chart/NQ%3DF?...
+//
+// Because the browser calls the SAME domain (/yf/...), CORS never applies.
+// No serverless function needed — pure edge rewrite.
 
 async function yahooFetch(path: string): Promise<any> {
-  // 1. Try our own Vercel serverless proxy first (always works in production)
+  // Primary: Vercel rewrite → query1
   try {
-    const { data } = await axios.get(`/api/yahoo?path=${encodeURIComponent(path)}`, {
-      timeout: 15_000,
-    });
+    const { data } = await axios.get(`/yf${path}`, { timeout: 15_000 });
     if (data?.chart?.result?.[0]) return data;
-  } catch { /* fall through to direct/proxy attempts */ }
+  } catch { /* try query2 */ }
 
-  // 2. Fallback: direct requests (works in dev / non-browser envs)
-  const YAHOO_HOSTS = [
-    "https://query1.finance.yahoo.com",
-    "https://query2.finance.yahoo.com",
-  ];
-  const FALLBACK_PROXIES = [
-    "",                                             // direct (no proxy)
-    "https://api.allorigins.win/raw?url=",          // allorigins
-    "https://thingproxy.freeboard.io/fetch/",       // thingproxy
-    "https://corsproxy.io/?",                       // corsproxy (sometimes 403s)
-  ];
+  // Secondary: Vercel rewrite → query2
+  try {
+    const { data } = await axios.get(`/yf2${path}`, { timeout: 15_000 });
+    if (data?.chart?.result?.[0]) return data;
+  } catch { /* fall through */ }
 
-  for (const host of YAHOO_HOSTS) {
-    const url = `${host}${path}`;
-    for (const proxy of FALLBACK_PROXIES) {
+  // Local dev fallback (rewrites don't exist locally)
+  if (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") {
+    for (const host of ["https://query1.finance.yahoo.com", "https://query2.finance.yahoo.com"]) {
       try {
-        const fullUrl = proxy ? `${proxy}${encodeURIComponent(url)}` : url;
-        const { data } = await axios.get(fullUrl, {
-          timeout: 12_000,
-          headers: proxy ? {} : { "Accept": "application/json" },
-        });
+        const { data } = await axios.get(`${host}${path}`, { timeout: 12_000 });
         if (data?.chart?.result?.[0]) return data;
       } catch { /* try next */ }
     }

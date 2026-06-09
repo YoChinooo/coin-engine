@@ -2,10 +2,14 @@
   "installCommand": "npm install",
   "buildCommand": "node node_modules/vite/bin/vite.js build",
   "outputDirectory": "dist",
-  "framework": "vite",
-  "functions": {
-    "api/yahoo.js": {
-      "runtime": "nodejs20.x"
+  "rewrites": [
+    {
+      "source": "/yf/:path*",
+      "destination": "https://query1.finance.yahoo.com/:path*"
+    },
+    {
+      "source": "/yf2/:path*",
+      "destination": "https://query2.finance.yahoo.com/:path*"
     }
-  }
+  ]
 }
