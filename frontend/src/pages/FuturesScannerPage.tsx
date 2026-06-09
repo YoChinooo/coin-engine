@@ -1139,19 +1139,29 @@ function LiveChart({ symbol, analysis, quote, onQuoteUpdate, assetType }: {
 
 function AlertToast({ alert, onDismiss }: { alert: AlertEntry; onDismiss: () => void }) {
   const isLong = alert.direction === "LONG";
+  const a = alert as any;
+  const isEarly = !!a._earlyLabel;
+  const bgClass = isEarly
+    ? "bg-yellow-950 border-yellow-500/40"
+    : isLong ? "bg-emerald-950 border-emerald-500/40" : "bg-red-950 border-red-500/40";
   return (
-    <div className={`flex items-start gap-3 p-3 rounded-xl border animate-pulse-once shadow-xl ${isLong ? "bg-emerald-950 border-emerald-500/40" : "bg-red-950 border-red-500/40"}`}>
-      <div className={`mt-0.5 shrink-0 ${isLong ? "text-emerald-400" : "text-red-400"}`}>
-        {isLong ? <ArrowUpCircle size={18} /> : <ArrowDownCircle size={18} />}
+    <div className={`flex items-start gap-3 p-3 rounded-xl border animate-pulse-once shadow-xl ${bgClass}`}>
+      <div className={`mt-0.5 shrink-0 ${isEarly ? "text-yellow-400" : isLong ? "text-emerald-400" : "text-red-400"}`}>
+        {isEarly ? <Clock size={18} /> : isLong ? <ArrowUpCircle size={18} /> : <ArrowDownCircle size={18} />}
       </div>
       <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <span className="text-white font-bold text-sm">{alert.symbol}</span>
-          <span className={`text-xs px-1.5 py-0.5 rounded font-bold ${isLong ? "bg-emerald-500/20 text-emerald-400" : "bg-red-500/20 text-red-400"}`}>{alert.direction}</span>
+          {isEarly
+            ? <span className="text-xs px-1.5 py-0.5 rounded font-bold bg-yellow-500/20 text-yellow-400">{a._earlyLabel} {alert.direction}</span>
+            : <span className={`text-xs px-1.5 py-0.5 rounded font-bold ${isLong ? "bg-emerald-500/20 text-emerald-400" : "bg-red-500/20 text-red-400"}`}>{alert.direction} SIGNAL</span>}
           <span className="text-xs text-slate-500 ml-auto">{alert.ts.toLocaleTimeString()}</span>
         </div>
         <div className="text-xs text-slate-300 mt-0.5">
-          Entry at <span className="font-mono text-white">${fmtP(alert.price)}</span> · Win prob: <span className={`font-bold ${alert.winProb >= 65 ? "text-emerald-400" : "text-yellow-400"}`}>{alert.winProb}%</span> · {alert.conviction} conviction
+          {isEarly
+            ? <><span className="text-yellow-300">{a._reason}</span> · <span className="font-mono text-white">${fmtP(alert.price)}</span></>
+            : <>Entry <span className="font-mono text-white">${fmtP(alert.price)}</span> · Win prob: <span className={`font-bold ${alert.winProb >= 65 ? "text-emerald-400" : "text-yellow-400"}`}>{alert.winProb}%</span> · {alert.conviction}</>
+          }
         </div>
       </div>
       <button onClick={onDismiss} className="text-slate-600 hover:text-slate-300 shrink-0"><X size={14} /></button>
@@ -1161,12 +1171,63 @@ function AlertToast({ alert, onDismiss }: { alert: AlertEntry; onDismiss: () => 
 
 // ─── Favorites monitor ────────────────────────────────────────────────────────
 
+// Detects a setup forming BEFORE full confirmation — fires early warning
+function detectEarlySetup(ind: ReturnType<typeof computeIndicators>, quote: Quote): {
+  direction: Direction; reason: string; urgency: "WATCH" | "READY";
+} | null {
+  const { rsi, macd, bb, aboveVwap, stoch, adx, ema9CrossUp, ema9CrossDown,
+          aboveEma9, aboveEma21, divergence } = ind as any;
+
+  // ── LONG setups ──────────────────────────────────────────────────────────
+  const longReasons: string[] = [];
+  // RSI approaching oversold or bouncing from it
+  if (rsi < 38) longReasons.push(`RSI ${rsi.toFixed(0)} oversold`);
+  else if (rsi < 45 && macd.histogram > 0) longReasons.push(`RSI ${rsi.toFixed(0)} + MACD bullish`);
+  // MACD histogram just turned positive (momentum flip)
+  if (macd.histogram > 0 && macd.histogram < 0.5 * Math.abs(macd.macd)) longReasons.push("MACD cross up");
+  // EMA9 crossed above EMA21 (golden cross on 5m)
+  if (ema9CrossUp) longReasons.push("EMA9 crossed EMA21 ↑");
+  // BB lower band touch with bullish stoch
+  if (bb.pct < 0.15 && stoch?.k < 30) longReasons.push("BB lower + Stoch oversold");
+  // Price reclaimed VWAP
+  if (aboveVwap && !aboveEma9) longReasons.push("VWAP reclaim");
+  // Bullish divergence
+  if (divergence === "BULLISH_DIV") longReasons.push("Bullish divergence");
+
+  // ── SHORT setups ─────────────────────────────────────────────────────────
+  const shortReasons: string[] = [];
+  if (rsi > 62) shortReasons.push(`RSI ${rsi.toFixed(0)} overbought`);
+  else if (rsi > 55 && macd.histogram < 0) shortReasons.push(`RSI ${rsi.toFixed(0)} + MACD bearish`);
+  if (macd.histogram < 0 && Math.abs(macd.histogram) < 0.5 * Math.abs(macd.macd)) shortReasons.push("MACD cross down");
+  if (ema9CrossDown) shortReasons.push("EMA9 crossed EMA21 ↓");
+  if (bb.pct > 0.85 && stoch?.k > 70) shortReasons.push("BB upper + Stoch overbought");
+  if (!aboveVwap && aboveEma9) shortReasons.push("VWAP rejection");
+  if (divergence === "BEARISH_DIV") shortReasons.push("Bearish divergence");
+
+  // Need at least 2 confluence signals to fire
+  const longScore  = longReasons.length;
+  const shortScore = shortReasons.length;
+  if (longScore < 2 && shortScore < 2) return null;
+
+  const direction: Direction = longScore > shortScore ? "LONG" : "SHORT";
+  const reasons = direction === "LONG" ? longReasons : shortReasons;
+  const count = direction === "LONG" ? longScore : shortScore;
+
+  // READY = 3+ signals or includes an EMA cross or divergence (strong early signal)
+  const hasStrongSignal = reasons.some(r => r.includes("EMA9") || r.includes("divergence") || r.includes("MACD cross"));
+  const urgency: "WATCH" | "READY" = (count >= 3 || hasStrongSignal) ? "READY" : "WATCH";
+
+  return { direction, reason: reasons.slice(0, 3).join(" · "), urgency };
+}
+
 function useFavoritesMonitor(
   favorites: string[],
   onAlert: (entry: AlertEntry) => void,
   enabled: boolean,
 ) {
-  const lastChecked = useRef<Record<string, number>>({});
+  // Separate cooldowns: confirmed signals (10 min) vs early setup alerts (3 min)
+  const lastFiredConfirmed = useRef<Record<string, number>>({});
+  const lastFiredEarly     = useRef<Record<string, number>>({});
 
   useEffect(() => {
     if (!enabled || favorites.length === 0) return;
@@ -1176,38 +1237,66 @@ function useFavoritesMonitor(
         try {
           const [quote, candles] = await Promise.all([fetchQuote(sym), fetchCandles(sym, "5m")]);
           const indicators = computeIndicators(candles);
-          const score = indicators.techScore * 0.5 + indicators.volScore * 0.3 + (indicators.aboveVwap ? 65 : 35) * 0.2;
-          const direction: Direction = score >= 62 ? "LONG" : score <= 38 ? "SHORT" : "NEUTRAL";
-          const conviction: Conviction = Math.abs(score - 50) >= 15 ? "HIGH" : Math.abs(score - 50) >= 8 ? "MEDIUM" : "LOW";
-          const winProb = calcWinProb(Math.round(score), indicators, direction);
-
-          // Only alert on HIGH conviction or winProb >= 68
-          if (direction === "NEUTRAL" || (conviction !== "HIGH" && winProb < 68)) continue;
-
-          // Rate-limit: only fire once per 10 minutes per symbol
           const now = Date.now();
-          if (lastChecked.current[sym] && now - lastChecked.current[sym] < 10 * 60 * 1000) continue;
-          lastChecked.current[sym] = now;
 
-          const entry: AlertEntry = {
-            id: `${sym}_${now}`, symbol: sym, direction, conviction,
-            price: quote.price, winProb, ts: new Date(), seen: false,
-          };
-          onAlert(entry);
+          // ── Full confirmed signal (existing logic) ──────────────────────
+          const score = indicators.techScore * 0.5 + indicators.volScore * 0.3 + (indicators.aboveVwap ? 65 : 35) * 0.2;
+          const direction: Direction = score >= 60 ? "LONG" : score <= 40 ? "SHORT" : "NEUTRAL";
+          const winProb = calcWinProb(Math.round(score), indicators, direction);
+          const conviction: Conviction = Math.abs(score - 50) >= 15 ? "HIGH" : Math.abs(score - 50) >= 8 ? "MEDIUM" : "LOW";
 
-          // Browser notification
+          if (direction !== "NEUTRAL" && (conviction === "HIGH" || winProb >= 65)) {
+            if (!lastFiredConfirmed.current[sym] || now - lastFiredConfirmed.current[sym] >= 10 * 60 * 1000) {
+              lastFiredConfirmed.current[sym] = now;
+              const entry: AlertEntry = {
+                id: `${sym}_conf_${now}`, symbol: sym, direction, conviction,
+                price: quote.price, winProb, ts: new Date(), seen: false,
+              };
+              onAlert(entry);
+              if (Notification.permission === "granted") {
+                new Notification(`⚡ ${sym} ${direction} Signal`, {
+                  body: `Entry $${fmtP(quote.price)} · Win prob: ${winProb}% · ${conviction}`,
+                  icon: "/favicon.ico",
+                });
+              }
+              continue; // skip early check if confirmed already fired
+            }
+          }
+
+          // ── Early setup alert — fires BEFORE full confirmation ──────────
+          // Cooldown: 3 min (so you get the heads-up with time to set a limit)
+          if (lastFiredEarly.current[sym] && now - lastFiredEarly.current[sym] < 3 * 60 * 1000) continue;
+
+          const setup = detectEarlySetup(indicators, quote);
+          if (!setup) continue;
+
+          lastFiredEarly.current[sym] = now;
+          const earlyConviction: Conviction = setup.urgency === "READY" ? "MEDIUM" : "LOW";
+          const earlyEntry: AlertEntry = {
+            id: `${sym}_early_${now}`, symbol: sym,
+            direction: setup.direction, conviction: earlyConviction,
+            price: quote.price, winProb: 0, ts: new Date(), seen: false,
+            // Store setup reason in a way the toast can show it
+            ...(setup.urgency === "READY"
+              ? { _earlyLabel: `⏰ SETUP READY`, _reason: setup.reason }
+              : { _earlyLabel: `👀 WATCH`, _reason: setup.reason }),
+          } as AlertEntry & { _earlyLabel: string; _reason: string };
+          onAlert(earlyEntry);
+
           if (Notification.permission === "granted") {
-            new Notification(`⚡ ${sym} ${direction} Signal`, {
-              body: `Entry at $${fmtP(quote.price)} · Win prob: ${winProb}% · ${conviction} conviction`,
+            const emoji = setup.urgency === "READY" ? "⏰" : "👀";
+            new Notification(`${emoji} ${sym} ${setup.direction} Setup ${setup.urgency === "READY" ? "— Set your limit now" : "forming"}`, {
+              body: setup.reason,
               icon: "/favicon.ico",
+              requireInteraction: setup.urgency === "READY",
             });
           }
         } catch { /* silent */ }
       }
     };
 
-    check(); // immediate first check
-    const iv = setInterval(check, 90_000); // every 90s
+    check();
+    const iv = setInterval(check, 30_000); // scan every 30s (was 90s)
     return () => clearInterval(iv);
   }, [favorites, enabled, onAlert]);
 }

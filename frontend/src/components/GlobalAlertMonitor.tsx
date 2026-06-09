@@ -50,8 +50,9 @@ function appendAlert(entry: object) {
   } catch { /**/ }
 }
 
-const INTERVAL_MS       = 90_000;          // favorites check every 90s
-const RATE_LIMIT_MS     = 10 * 60 * 1000;  // favorites: once per 10 min per symbol
+const INTERVAL_MS       = 30_000;          // favorites check every 30s (was 90s)
+const RATE_LIMIT_MS     = 10 * 60 * 1000;  // confirmed signals: once per 10 min
+const EARLY_SETUP_LIMIT = 3 * 60 * 1000;   // early setup alerts: once per 3 min
 const EARLY_INTERVAL_MS = 5 * 60 * 1000;   // early scan every 5 min
 
 // ── Early alert cooldown — persisted across page reloads ──────────────────────
@@ -91,7 +92,8 @@ function appendEarlyAlert(entry: object) {
 }
 
 export function GlobalAlertMonitor() {
-  const lastFired  = useRef<Record<string, number>>({});
+  const lastFired      = useRef<Record<string, number>>({});
+  const lastEarlyFired = useRef<Record<string, number>>({});
   const abortRef   = useRef(false);
 
   const runCheck = useCallback(async () => {
@@ -136,9 +138,40 @@ export function GlobalAlertMonitor() {
         const convictionNum = Math.abs(composite - 50);
         const conviction = convictionNum >= 15 ? "HIGH" : convictionNum >= 8 ? "MEDIUM" : "LOW";
 
-        // Only fire on strong signals
+        // Only fire confirmed signal on strong signals
         if (conviction === "LOW" && winProb < 68) continue;
-        if (winProb < (cfg.minWinProb || 65)) continue;
+        if (winProb < (cfg.minWinProb || 65)) {
+          // Not strong enough for confirmed signal — try early setup alert instead
+          const earlyKey = `early_${sym}`;
+          if (!lastEarlyFired.current[earlyKey] || now - lastEarlyFired.current[earlyKey] >= EARLY_SETUP_LIMIT) {
+            // 2+ indicator conditions pointing same direction = early alert
+            const longSignals = [
+              ind.rsi < 42, ind.macd.histogram > 0 && ind.macd.histogram < Math.abs(ind.macd.macd) * 0.5,
+              ind.bb.pct < 0.2, ind.aboveVwap,
+              (ind as any).ema9CrossUp, (ind as any).divergence === "BULLISH_DIV",
+            ].filter(Boolean).length;
+            const shortSignals = [
+              ind.rsi > 58, ind.macd.histogram < 0 && Math.abs(ind.macd.histogram) < Math.abs(ind.macd.macd) * 0.5,
+              ind.bb.pct > 0.8, !ind.aboveVwap,
+              (ind as any).ema9CrossDown, (ind as any).divergence === "BEARISH_DIV",
+            ].filter(Boolean).length;
+
+            const earlyDir = longSignals >= 2 ? "LONG" : shortSignals >= 2 ? "SHORT" : null;
+            if (earlyDir) {
+              lastEarlyFired.current[earlyKey] = now;
+              if (Notification.permission === "granted") {
+                const emoji = earlyDir === "LONG" ? "⏰" : "⏰";
+                new Notification(`${emoji} ${sym} ${earlyDir} Setup Forming — Set limit now`, {
+                  body: `Price: $${quote.price.toFixed(2)} · ${earlyDir === "LONG" ? longSignals : shortSignals} signals aligning`,
+                  icon: "/favicon.ico",
+                  tag: `coinengine-early-setup-${sym}`,
+                  requireInteraction: true,
+                });
+              }
+            }
+          }
+          continue;
+        }
 
         lastFired.current[sym] = now;
 
