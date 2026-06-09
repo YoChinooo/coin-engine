@@ -2,6 +2,11 @@
   "installCommand": "npm install",
   "buildCommand": "node node_modules/vite/bin/vite.js build",
   "outputDirectory": "dist",
+  "functions": {
+    "api/yahoo.js": {
+      "runtime": "nodejs18.x"
+    }
+  },
   "rewrites": [
     {
       "source": "/yf/:path*",
