@@ -207,11 +207,13 @@ function buildSetup(price: number, direction: Direction, assetType: AssetType,
   const atrMultiplier = assetType === "futures" ? 1.5 : assetType === "crypto" ? 1.8 : 1.4;
   const atrStop = atr * atrMultiplier;
 
-  // Entry: limit just inside current price for fill probability
-  const entryOffset = assetType === "futures" ? 0.001 : 0.002;
-  const entryLimit = tick(price * (isLong ? 1 - entryOffset : 1 + entryOffset));
-  const entryLow   = tick(price * (isLong ? 0.997 : 1.001));
-  const entryHigh  = tick(price * (isLong ? 1.002 : 0.999));
+  // Entry: set AT current price (no offset lag).
+  // For futures, the limit order is placed at the live market price so it fills
+  // immediately or on the very next tick — not 0.1% away from a stale analysis price.
+  // Entry zone (low/high) gives a ±0.15% bracket for scaling in.
+  const entryLimit = tick(price);
+  const entryLow   = tick(price * (isLong ? 0.9985 : 1.0015));
+  const entryHigh  = tick(price * (isLong ? 1.0015 : 0.9985));
 
   // ── Minimum meaningful stop distance ─────────────────────────────────────
   // SL must be at least 1.5× ATR from entry even after key-level anchoring

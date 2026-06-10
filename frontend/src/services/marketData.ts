@@ -239,8 +239,8 @@ function parseCandles(result: any, tf: TF): Candle[] {
   for (let i = 0; i < timestamps.length; i++) {
     const o = opens[i], h = highs[i], l = lows[i], c = closes[i], v = volumes[i];
     if (o == null || h == null || l == null || c == null) continue;
-    // Drop corrupted candles: close must be within 30% of median (catches stale/zero data)
-    if (medianClose > 0 && (c < medianClose * 0.70 || c > medianClose * 1.30)) continue;
+    // Drop corrupted candles: close must be within 15% of median (catches stale/zero data)
+    if (medianClose > 0 && (c < medianClose * 0.85 || c > medianClose * 1.15)) continue;
     // Drop zero/negative OHLC
     if (o <= 0 || h <= 0 || l <= 0 || c <= 0) continue;
     const ts = timestamps[i] * 1000;
