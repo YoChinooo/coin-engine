@@ -182,7 +182,10 @@ function deterministicRand(s: number, offset: number) {
  * Round to nearest $0.25 tick — CME equity-index futures (ES, NQ, YM, RTY) only.
  * Other futures (GC=$0.10, CL=$0.01) and crypto/stocks use raw precision.
  */
-const QUARTER_TICK_SYMBOLS = new Set(["ES","NQ","YM","RTY","MES","MNQ","MYM","M2K","EMD"]);
+const QUARTER_TICK_SYMBOLS = new Set([
+  "ES","NQ","YM","RTY","MES","MNQ","MYM","M2K","EMD",
+  "ES=F","NQ=F","YM=F","RTY=F","MES=F","MNQ=F","MYM=F","M2K=F","EMD=F",
+]);
 function roundToTick(n: number, symbol: string, assetType: AssetType): number {
   if (assetType === "futures" && QUARTER_TICK_SYMBOLS.has(symbol.toUpperCase())) {
     return Math.round(n * 4) / 4; // $0.25 tick
@@ -210,6 +213,11 @@ function buildSetup(price: number, direction: Direction, assetType: AssetType,
   const entryLow   = tick(price * (isLong ? 0.997 : 1.001));
   const entryHigh  = tick(price * (isLong ? 1.002 : 0.999));
 
+  // ── Minimum meaningful stop distance ─────────────────────────────────────
+  // SL must be at least 1.5× ATR from entry even after key-level anchoring
+  // AND at least 0.10% of price (prevents microscopic stops from bad ATR data)
+  const minStopDist = Math.max(atrStop, entryLimit * 0.001);
+
   // Stop loss: ATR-based, anchored to nearest swing level if tighter
   let rawStop = isLong ? entryLimit - atrStop : entryLimit + atrStop;
   if (isLong && keyLevels.support.length > 0) {
@@ -224,30 +232,45 @@ function buildSetup(price: number, direction: Direction, assetType: AssetType,
       rawStop = nearestRes * (1 + 0.002);
     }
   }
-  const stopLoss = tick(rawStop);
-  const riskDollar = Math.abs(entryLimit - stopLoss);
+  // Enforce minimum distance — key level must not pull SL inside minimum range
+  if (isLong  && rawStop > entryLimit - minStopDist) rawStop = entryLimit - minStopDist;
+  if (!isLong && rawStop < entryLimit + minStopDist) rawStop = entryLimit + minStopDist;
+
+  const stopLoss  = tick(rawStop);
+  const rawRisk   = Math.abs(entryLimit - stopLoss);
+  // If rounding collapsed riskDollar to 0, use the un-rounded distance
+  const riskDollar = rawRisk > 0 ? rawRisk : Math.abs(entryLimit - rawStop);
 
   // TP levels: 1.5:1 / 2.5:1 / 4:1 RR
-  // TP1 at 1.5× covers commissions+slippage and still locks profit
-  // TP2 at 2.5× is the "runner" partial — strong trending setups
-  // TP3 at 4×   is the full-trend target — only hit on HIGH conviction moves
   const t1 = tick(isLong ? entryLimit + riskDollar * 1.5 : entryLimit - riskDollar * 1.5);
   const t2 = tick(isLong ? entryLimit + riskDollar * 2.5 : entryLimit - riskDollar * 2.5);
   const t3 = tick(isLong ? entryLimit + riskDollar * 4.0 : entryLimit - riskDollar * 4.0);
 
-  // Validate against key levels — pull TPs back to nearest S/R if closer
+  // Validate against key levels — only apply if level is within 6% of entry
   let target1 = t1, target2 = t2, target3 = t3;
+  const withinRange = (lvl: number) => Math.abs(lvl - entryLimit) / entryLimit < 0.06;
   if (isLong && keyLevels.resistance.length > 0) {
     const [r1, r2, r3] = keyLevels.resistance;
-    if (r1 && r1 > entryLimit && r1 < t2) target1 = tick(r1 * 0.999);
-    if (r2 && r2 > t1 && r2 < t3)         target2 = tick(r2 * 0.999);
-    if (r3 && r3 > t2)                     target3 = tick(r3 * 0.999);
+    if (r1 && withinRange(r1) && r1 > entryLimit && r1 < t2) target1 = tick(r1 * 0.999);
+    if (r2 && withinRange(r2) && r2 > t1 && r2 < t3)         target2 = tick(r2 * 0.999);
+    if (r3 && withinRange(r3) && r3 > t2)                     target3 = tick(r3 * 0.999);
   }
   if (!isLong && keyLevels.support.length > 0) {
     const [s1, s2, s3] = keyLevels.support;
-    if (s1 && s1 < entryLimit && s1 > t2) target1 = tick(s1 * 1.001);
-    if (s2 && s2 < t1 && s2 > t3)         target2 = tick(s2 * 1.001);
-    if (s3 && s3 < t2)                     target3 = tick(s3 * 1.001);
+    if (s1 && withinRange(s1) && s1 < entryLimit && s1 > t2) target1 = tick(s1 * 1.001);
+    if (s2 && withinRange(s2) && s2 < t1 && s2 > t3)         target2 = tick(s2 * 1.001);
+    if (s3 && withinRange(s3) && s3 < t2)                     target3 = tick(s3 * 1.001);
+  }
+
+  // Final sanity: TPs must be on the correct side of entry and in ascending order
+  if (isLong) {
+    if (target1 <= entryLimit) target1 = t1;
+    if (target2 <= target1)    target2 = t2;
+    if (target3 <= target2)    target3 = t3;
+  } else {
+    if (target1 >= entryLimit) target1 = t1;
+    if (target2 >= target1)    target2 = t2;
+    if (target3 >= target2)    target3 = t3;
   }
 
   const rr = (target: number) => riskDollar > 0

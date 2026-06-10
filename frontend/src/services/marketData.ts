@@ -229,10 +229,20 @@ function parseCandles(result: any, tf: TF): Candle[] {
   const closes  = q.close  ?? [];
   const volumes = q.volume ?? [];
 
+  // Compute median close first so we can filter outlier candles
+  const validCloses = (closes as number[]).filter(c => c != null && isFinite(c) && c > 0);
+  const medianClose = validCloses.length > 0
+    ? validCloses.slice().sort((a, b) => a - b)[Math.floor(validCloses.length / 2)]
+    : 0;
+
   const raw: Candle[] = [];
   for (let i = 0; i < timestamps.length; i++) {
     const o = opens[i], h = highs[i], l = lows[i], c = closes[i], v = volumes[i];
     if (o == null || h == null || l == null || c == null) continue;
+    // Drop corrupted candles: close must be within 30% of median (catches stale/zero data)
+    if (medianClose > 0 && (c < medianClose * 0.70 || c > medianClose * 1.30)) continue;
+    // Drop zero/negative OHLC
+    if (o <= 0 || h <= 0 || l <= 0 || c <= 0) continue;
     const ts = timestamps[i] * 1000;
     const date = new Date(ts);
     let label: string;
@@ -469,17 +479,21 @@ export function calcSMA(closes: number[], period: number): number {
 }
 
 export function calcATR(candles: Candle[], period = 14): number {
-  if (candles.length < 2) return (candles[0]?.close ?? 0) * 0.01;
+  const lastClose = candles[candles.length - 1]?.close ?? 0;
+  const minATR = lastClose * 0.0005; // floor: 0.05% of price (e.g. $3.67 on $7,339 ES)
+  if (candles.length < 2) return Math.max(minATR, lastClose * 0.01);
   const trs: number[] = [];
   for (let i = 1; i < candles.length; i++) {
     const c = candles[i], p = candles[i - 1];
-    trs.push(Math.max(c.high - c.low, Math.abs(c.high - p.close), Math.abs(c.low - p.close)));
+    const tr = Math.max(c.high - c.low, Math.abs(c.high - p.close), Math.abs(c.low - p.close));
+    if (tr > 0) trs.push(tr); // skip zero-range candles (holidays, bad data)
   }
-  if (trs.length === 0) return 0;
+  if (trs.length === 0) return Math.max(minATR, lastClose * 0.005);
   // Wilder's smoothing
   let atr = trs.slice(0, Math.min(period, trs.length)).reduce((a, b) => a + b, 0) / Math.min(period, trs.length);
   for (let i = period; i < trs.length; i++) atr = (atr * (period - 1) + trs[i]) / period;
-  return atr;
+  // Sanity floor: computed ATR must be at least 0.05% of price
+  return Math.max(atr, minATR);
 }
 
 function findKeyLevels(candles: Candle[]): KeyLevels {
@@ -501,9 +515,12 @@ function findKeyLevels(candles: Candle[]): KeyLevels {
     }
   }
 
-  // Find distinct groups (cluster within 0.3% of each other)
+  // Find distinct groups (cluster within 0.3% of each other, max 8% from price)
   const cluster = (levels: number[], above: boolean) => {
-    const filtered = levels.filter(l => above ? l > last : l < last);
+    const filtered = levels.filter(l =>
+      (above ? l > last : l < last) &&
+      Math.abs(l - last) / last < 0.08, // must be within 8% of current price
+    );
     const sorted = filtered.sort((a, b) => above ? a - b : b - a);
     const out: number[] = [];
     for (const l of sorted) {
