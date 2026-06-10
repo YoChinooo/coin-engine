@@ -178,37 +178,44 @@ function deterministicRand(s: number, offset: number) {
 
 // ─── Build setup for given direction ─────────────────────────────────────────
 
-/** Round to nearest $0.25 tick (0.00, 0.25, 0.50, 0.75) */
-function round25(n: number): number {
-  return Math.round(n * 4) / 4;
+/**
+ * Round to nearest $0.25 tick — CME equity-index futures (ES, NQ, YM, RTY) only.
+ * Other futures (GC=$0.10, CL=$0.01) and crypto/stocks use raw precision.
+ */
+const QUARTER_TICK_SYMBOLS = new Set(["ES","NQ","YM","RTY","MES","MNQ","MYM","M2K","EMD"]);
+function roundToTick(n: number, symbol: string, assetType: AssetType): number {
+  if (assetType === "futures" && QUARTER_TICK_SYMBOLS.has(symbol.toUpperCase())) {
+    return Math.round(n * 4) / 4; // $0.25 tick
+  }
+  return parseFloat(n.toFixed(2)); // 2 decimal places for everything else
 }
 
 function buildSetup(price: number, direction: Direction, assetType: AssetType,
                     conviction: Conviction, compositeScore: number,
-                    indicators: Indicators, userContext: string): TradeSetup {
+                    indicators: Indicators, userContext: string,
+                    symbol = ""): TradeSetup {
   const isLong = direction !== "SHORT";
-  const fmt5 = (n: number) => round25(parseFloat(n.toPrecision(8)));
+  const tick = (n: number) => roundToTick(parseFloat(n.toPrecision(8)), symbol, assetType);
 
-  // ── ATR-based stop loss (much more precise than fixed %) ──────────────────
+  // ── ATR-based stop loss ────────────────────────────────────────────────────
+  // 1.5× ATR for equity futures (was 1.2× — too tight, stopped out on noise)
+  // 1.8× for crypto (high overnight volatility), 1.4× for stocks
   const { rsi, macd, bb, vwap, aboveVwap, sma20, sma50, atr, keyLevels } = indicators;
-  const atrMultiplier = assetType === "futures" ? 1.2 : assetType === "crypto" ? 1.5 : 1.3;
+  const atrMultiplier = assetType === "futures" ? 1.5 : assetType === "crypto" ? 1.8 : 1.4;
   const atrStop = atr * atrMultiplier;
 
-  // Entry: slightly better than market for limit order
-  // Long: buy limit just below current price (wait for slight pullback)
-  // Short: sell limit just above current price
+  // Entry: limit just inside current price for fill probability
   const entryOffset = assetType === "futures" ? 0.001 : 0.002;
-  const entryLimit = fmt5(price * (isLong ? 1 - entryOffset : 1 + entryOffset));
-  const entryLow   = fmt5(price * (isLong ? 0.997 : 1.001));
-  const entryHigh  = fmt5(price * (isLong ? 1.002 : 0.999));
+  const entryLimit = tick(price * (isLong ? 1 - entryOffset : 1 + entryOffset));
+  const entryLow   = tick(price * (isLong ? 0.997 : 1.001));
+  const entryHigh  = tick(price * (isLong ? 1.002 : 0.999));
 
-  // Stop loss: ATR-based, but also respect nearest swing level
+  // Stop loss: ATR-based, anchored to nearest swing level if tighter
   let rawStop = isLong ? entryLimit - atrStop : entryLimit + atrStop;
-  // Adjust SL to just beyond nearest support/resistance for smarter placement
   if (isLong && keyLevels.support.length > 0) {
     const nearestSup = keyLevels.support[0];
     if (nearestSup < entryLimit && nearestSup > rawStop) {
-      rawStop = nearestSup * (1 - 0.002); // 0.2% below the support
+      rawStop = nearestSup * (1 - 0.002);
     }
   }
   if (!isLong && keyLevels.resistance.length > 0) {
@@ -217,27 +224,30 @@ function buildSetup(price: number, direction: Direction, assetType: AssetType,
       rawStop = nearestRes * (1 + 0.002);
     }
   }
-  const stopLoss = round25(fmt5(rawStop));
+  const stopLoss = tick(rawStop);
   const riskDollar = Math.abs(entryLimit - stopLoss);
 
-  // TP levels based on RR ratios (1:1, 1:2, 1:3) — rounded to $0.25 ticks
-  const t1 = round25(isLong ? entryLimit + riskDollar * 1.0 : entryLimit - riskDollar * 1.0);
-  const t2 = round25(isLong ? entryLimit + riskDollar * 2.0 : entryLimit - riskDollar * 2.0);
-  const t3 = round25(isLong ? entryLimit + riskDollar * 3.0 : entryLimit - riskDollar * 3.0);
+  // TP levels: 1.5:1 / 2.5:1 / 4:1 RR
+  // TP1 at 1.5× covers commissions+slippage and still locks profit
+  // TP2 at 2.5× is the "runner" partial — strong trending setups
+  // TP3 at 4×   is the full-trend target — only hit on HIGH conviction moves
+  const t1 = tick(isLong ? entryLimit + riskDollar * 1.5 : entryLimit - riskDollar * 1.5);
+  const t2 = tick(isLong ? entryLimit + riskDollar * 2.5 : entryLimit - riskDollar * 2.5);
+  const t3 = tick(isLong ? entryLimit + riskDollar * 4.0 : entryLimit - riskDollar * 4.0);
 
-  // Validate against key levels — push TPs to resistance/support if closer
+  // Validate against key levels — pull TPs back to nearest S/R if closer
   let target1 = t1, target2 = t2, target3 = t3;
   if (isLong && keyLevels.resistance.length > 0) {
     const [r1, r2, r3] = keyLevels.resistance;
-    if (r1 && r1 > entryLimit && r1 < t2) target1 = round25(r1 * 0.999);
-    if (r2 && r2 > t1 && r2 < t3)         target2 = round25(r2 * 0.999);
-    if (r3 && r3 > t2)                     target3 = round25(r3 * 0.999);
+    if (r1 && r1 > entryLimit && r1 < t2) target1 = tick(r1 * 0.999);
+    if (r2 && r2 > t1 && r2 < t3)         target2 = tick(r2 * 0.999);
+    if (r3 && r3 > t2)                     target3 = tick(r3 * 0.999);
   }
   if (!isLong && keyLevels.support.length > 0) {
     const [s1, s2, s3] = keyLevels.support;
-    if (s1 && s1 < entryLimit && s1 > t2) target1 = round25(s1 * 1.001);
-    if (s2 && s2 < t1 && s2 > t3)         target2 = round25(s2 * 1.001);
-    if (s3 && s3 < t2)                     target3 = round25(s3 * 1.001);
+    if (s1 && s1 < entryLimit && s1 > t2) target1 = tick(s1 * 1.001);
+    if (s2 && s2 < t1 && s2 > t3)         target2 = tick(s2 * 1.001);
+    if (s3 && s3 < t2)                     target3 = tick(s3 * 1.001);
   }
 
   const rr = (target: number) => riskDollar > 0
@@ -512,7 +522,7 @@ async function buildAnalysis(
       weight: 0, score: assetSpecScore, signal: sig(assetSpecScore), findings: assetFindings },
   ];
 
-  const setup = buildSetup(price, direction, assetType, conviction, composite, indicators, userContext);
+  const setup = buildSetup(price, direction, assetType, conviction, composite, indicators, userContext, sym);
 
   return {
     symbol: sym, yahooTicker: toYahooTicker(sym, assetType), assetType,
