@@ -178,11 +178,16 @@ function deterministicRand(s: number, offset: number) {
 
 // ─── Build setup for given direction ─────────────────────────────────────────
 
+/** Round to nearest $0.25 tick (0.00, 0.25, 0.50, 0.75) */
+function round25(n: number): number {
+  return Math.round(n * 4) / 4;
+}
+
 function buildSetup(price: number, direction: Direction, assetType: AssetType,
                     conviction: Conviction, compositeScore: number,
                     indicators: Indicators, userContext: string): TradeSetup {
   const isLong = direction !== "SHORT";
-  const fmt5 = (n: number) => parseFloat(n.toPrecision(8));
+  const fmt5 = (n: number) => round25(parseFloat(n.toPrecision(8)));
 
   // ── ATR-based stop loss (much more precise than fixed %) ──────────────────
   const { rsi, macd, bb, vwap, aboveVwap, sma20, sma50, atr, keyLevels } = indicators;
@@ -212,27 +217,27 @@ function buildSetup(price: number, direction: Direction, assetType: AssetType,
       rawStop = nearestRes * (1 + 0.002);
     }
   }
-  const stopLoss = fmt5(rawStop);
+  const stopLoss = round25(fmt5(rawStop));
   const riskDollar = Math.abs(entryLimit - stopLoss);
 
-  // TP levels based on RR ratios (1:1, 1:2, 1:3)
-  const t1 = fmt5(isLong ? entryLimit + riskDollar * 1.0 : entryLimit - riskDollar * 1.0);
-  const t2 = fmt5(isLong ? entryLimit + riskDollar * 2.0 : entryLimit - riskDollar * 2.0);
-  const t3 = fmt5(isLong ? entryLimit + riskDollar * 3.0 : entryLimit - riskDollar * 3.0);
+  // TP levels based on RR ratios (1:1, 1:2, 1:3) — rounded to $0.25 ticks
+  const t1 = round25(isLong ? entryLimit + riskDollar * 1.0 : entryLimit - riskDollar * 1.0);
+  const t2 = round25(isLong ? entryLimit + riskDollar * 2.0 : entryLimit - riskDollar * 2.0);
+  const t3 = round25(isLong ? entryLimit + riskDollar * 3.0 : entryLimit - riskDollar * 3.0);
 
   // Validate against key levels — push TPs to resistance/support if closer
   let target1 = t1, target2 = t2, target3 = t3;
   if (isLong && keyLevels.resistance.length > 0) {
     const [r1, r2, r3] = keyLevels.resistance;
-    if (r1 && r1 > entryLimit && r1 < t2) target1 = fmt5(r1 * 0.999);
-    if (r2 && r2 > t1 && r2 < t3)         target2 = fmt5(r2 * 0.999);
-    if (r3 && r3 > t2)                     target3 = fmt5(r3 * 0.999);
+    if (r1 && r1 > entryLimit && r1 < t2) target1 = round25(r1 * 0.999);
+    if (r2 && r2 > t1 && r2 < t3)         target2 = round25(r2 * 0.999);
+    if (r3 && r3 > t2)                     target3 = round25(r3 * 0.999);
   }
   if (!isLong && keyLevels.support.length > 0) {
     const [s1, s2, s3] = keyLevels.support;
-    if (s1 && s1 < entryLimit && s1 > t2) target1 = fmt5(s1 * 1.001);
-    if (s2 && s2 < t1 && s2 > t3)         target2 = fmt5(s2 * 1.001);
-    if (s3 && s3 < t2)                     target3 = fmt5(s3 * 1.001);
+    if (s1 && s1 < entryLimit && s1 > t2) target1 = round25(s1 * 1.001);
+    if (s2 && s2 < t1 && s2 > t3)         target2 = round25(s2 * 1.001);
+    if (s3 && s3 < t2)                     target3 = round25(s3 * 1.001);
   }
 
   const rr = (target: number) => riskDollar > 0
