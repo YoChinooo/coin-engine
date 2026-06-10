@@ -314,37 +314,61 @@ export async function fetchQuote(symbol: string, assetType?: "futures" | "stock"
   const cached = cGet<Quote>(key, QUOTE_TTL);
   if (cached) return cached;
 
-  // Fetch 5 daily bars. During the trading day, today's bar has close=null
-  // (incomplete), so the last non-null close is always the previous session.
-  // This works for 24hr futures (NQ, ES, CL, GC) unlike timestamp-based approaches.
-  const data = await yahooFetchWithFallback(`/v8/finance/chart/__TICKER__?interval=1d&range=5d`, symbol, assetType);
+  // ── Strategy: fetch 2-day hourly candles (60m × 2d) ────────────────────────
+  // This is the most reliable way to get a real previous close for ALL asset types:
+  //   • Futures trade 23/7 — daily bars often fill today's incomplete close = current price
+  //   • With 60m candles we can find the LAST candle that finished BEFORE today's midnight
+  //     and use that as prevClose, giving an accurate daily change %
+  const data = await yahooFetchWithFallback(
+    `/v8/finance/chart/__TICKER__?interval=60m&range=2d&includePrePost=false`,
+    symbol, assetType,
+  );
   const result = data.chart.result[0];
   const meta   = result.meta;
 
   const price = meta.regularMarketPrice ?? 0;
 
-  // Previous close: last daily candle close that is NOT null
-  // Today's intraday bar has close=null until market closes, so this is always yesterday
+  // Find the last candle that closed BEFORE today (midnight local time)
   let prevClose = 0;
   try {
+    const timestamps: number[] = result.timestamp ?? [];
     const closes: (number | null)[] = result.indicators?.quote?.[0]?.close ?? [];
-    // Walk backwards, skip null/zero, skip a value that equals current price exactly
-    for (let i = closes.length - 1; i >= 0; i--) {
-      const c = closes[i];
-      if (c && isFinite(c) && c > 0 && Math.abs(c - price) > 0.01) {
-        prevClose = c;
-        break;
+    const todayStartTs = new Date().setHours(0, 0, 0, 0) / 1000; // epoch seconds
+
+    // Walk all candles and keep updating prevClose for every candle before today
+    for (let i = 0; i < timestamps.length; i++) {
+      if (timestamps[i] < todayStartTs) {
+        const c = closes[i];
+        if (c && isFinite(c) && c > 0) prevClose = c;
       }
     }
   } catch { /**/ }
 
-  // Final fallback chain
-  if (!prevClose || prevClose === price) {
-    prevClose = meta.chartPreviousClose ?? meta.previousClose ?? price;
+  // Fallback 1: meta fields (chartPreviousClose is more reliable than previousClose for futures)
+  if (!prevClose || prevClose <= 0) {
+    prevClose = meta.chartPreviousClose ?? 0;
+  }
+  // Fallback 2: walk backwards through ALL closes and find one that differs from current price
+  if (!prevClose || prevClose <= 0) {
+    try {
+      const closes: (number | null)[] = result.indicators?.quote?.[0]?.close ?? [];
+      for (let i = closes.length - 1; i >= 0; i--) {
+        const c = closes[i];
+        if (c && isFinite(c) && c > 0 && Math.abs(c - price) > price * 0.0001) {
+          prevClose = c;
+          break;
+        }
+      }
+    } catch { /**/ }
+  }
+  // Final fallback: Yahoo's previousClose (may be buggy for futures but better than 0)
+  if (!prevClose || prevClose <= 0) {
+    prevClose = meta.previousClose ?? price;
   }
 
   const chg       = price - prevClose;
-  const changePct = prevClose > 0 && prevClose !== price ? (chg / prevClose) * 100 : 0;
+  const changePct = prevClose > 0 && Math.abs(prevClose - price) > price * 0.00001
+    ? (chg / prevClose) * 100 : 0;
 
   const q: Quote = {
     symbol:      meta.symbol ?? ticker,
