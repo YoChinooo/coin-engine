@@ -238,10 +238,18 @@ function buildSetup(price: number, direction: Direction, assetType: AssetType,
   if (isLong  && rawStop > entryLimit - minStopDist) rawStop = entryLimit - minStopDist;
   if (!isLong && rawStop < entryLimit + minStopDist) rawStop = entryLimit + minStopDist;
 
-  const stopLoss  = tick(rawStop);
-  const rawRisk   = Math.abs(entryLimit - stopLoss);
-  // If rounding collapsed riskDollar to 0, use the un-rounded distance
-  const riskDollar = rawRisk > 0 ? rawRisk : Math.abs(entryLimit - rawStop);
+  let stopLoss = tick(rawStop);
+  // Tick-rounding can collapse entry and stop onto the SAME price when the raw
+  // distance is smaller than one tick. Push the stop out by whole ticks until
+  // it's clear of entry — otherwise riskDollar → ~0 and every TP collapses too.
+  const tickSize = QUARTER_TICK_SYMBOLS.has(symbol.toUpperCase()) ? 0.25 : Math.max(entryLimit * 0.0005, 0.01);
+  const minTicks = 2; // require at least 2 ticks of separation
+  let guard = 0;
+  while (Math.abs(entryLimit - stopLoss) < tickSize * minTicks && guard < 20) {
+    stopLoss = isLong ? tick(stopLoss - tickSize) : tick(stopLoss + tickSize);
+    guard++;
+  }
+  const riskDollar = Math.max(Math.abs(entryLimit - stopLoss), tickSize * minTicks);
 
   // TP levels: 1.5:1 / 2.5:1 / 4:1 RR
   const t1 = tick(isLong ? entryLimit + riskDollar * 1.5 : entryLimit - riskDollar * 1.5);
@@ -522,11 +530,17 @@ async function buildAnalysis(
   cast(volScore,       0.15);
   cast(breakoutScore,  0.13);
   cast(patternScore,   0.10);
-  // Hard signals — override weak composite
-  if (ema9CrossUp   && aboveVwap && macd.histogram > 0) votes.bull += 15;
-  if (ema9CrossDown && !aboveVwap && macd.histogram < 0) votes.bear += 15;
-  if (divergence === "BULLISH_DIV") votes.bull += 10;
-  if (divergence === "BEARISH_DIV") votes.bear += 10;
+
+  // Hard signals — confirm/strengthen the weighted read, but don't let 3
+  // conditions manufacture HIGH conviction when 6 weighted indicators already
+  // disagree. Full bonus when it agrees with (or composite is ~neutral on)
+  // the weighted lean; half bonus when it's fighting a real opposing trend —
+  // that's exactly the whipsaw scenario that fakes traders out.
+  const weightedMargin = votes.bull - votes.bear;
+  if (ema9CrossUp   && aboveVwap && macd.histogram > 0) votes.bull += weightedMargin >= -5 ? 15 : 7;
+  if (ema9CrossDown && !aboveVwap && macd.histogram < 0) votes.bear += weightedMargin <= 5 ? 15 : 7;
+  if (divergence === "BULLISH_DIV") votes.bull += weightedMargin >= -5 ? 10 : 5;
+  if (divergence === "BEARISH_DIV") votes.bear += weightedMargin <= 5 ? 10 : 5;
 
   const voteMargin = votes.bull - votes.bear;
   const direction: Direction = voteMargin > 8 ? "LONG" : voteMargin < -8 ? "SHORT" : "NEUTRAL";
@@ -900,7 +914,7 @@ function TradeDirectionPanel({
   const setup = useMemo(() => {
     if (selectedDir === "NEUTRAL") return analysis.setup;
     return buildSetup(quote.price, selectedDir, analysis.assetType, analysis.conviction,
-      analysis.compositeScore, analysis.indicators, "");
+      analysis.compositeScore, analysis.indicators, "", analysis.symbol);
   }, [selectedDir, quote.price, analysis]);
 
   const winProb = calcWinProb(analysis.compositeScore, analysis.indicators, selectedDir);
@@ -2260,7 +2274,7 @@ export function FuturesScannerPage() {
             {(() => {
               const setup = selectedDir === "NEUTRAL" ? analysis.setup
                 : buildSetup(quote.price, selectedDir, analysis.assetType, analysis.conviction,
-                    analysis.compositeScore, analysis.indicators, "");
+                    analysis.compositeScore, analysis.indicators, "", analysis.symbol);
               return <LimitOrderPanel setup={setup} symbol={analysis.symbol} />;
             })()}
 

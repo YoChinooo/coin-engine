@@ -461,11 +461,27 @@ export function calcBB(closes: number[], period = 20, stdMult = 2): BBResult {
   return { upper, middle: sma, lower, pct: parseFloat(pct.toFixed(4)) };
 }
 
+/**
+ * CME Globex session date — futures trade ~23h/day starting 5PM CT, and that
+ * session is labeled as the NEXT trade date. Using browser-local midnight to
+ * decide "today" desyncs VWAP from the real session for every US timezone
+ * (the actual session boundary always falls in the middle of the night).
+ */
+function getSessionDate(ts: number): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hour12: false,
+  }).formatToParts(new Date(ts));
+  const get = (type: string) => parts.find(p => p.type === type)?.value ?? "0";
+  const hour = parseInt(get("hour") === "24" ? "0" : get("hour"), 10);
+  const d = new Date(`${get("year")}-${get("month")}-${get("day")}T00:00:00Z`);
+  if (hour >= 17) d.setUTCDate(d.getUTCDate() + 1); // post-5PM CT rolls into next trade date
+  return d.toISOString().slice(0, 10);
+}
+
 export function calcVWAP(candles: Candle[]): number {
-  const today = candles.filter(c => {
-    const d = new Date(c.ts).toDateString();
-    return d === new Date().toDateString();
-  });
+  const nowSession = getSessionDate(Date.now());
+  const today = candles.filter(c => getSessionDate(c.ts) === nowSession);
   const data = today.length > 0 ? today : candles.slice(-20);
   const sumPV = data.reduce((s, c) => s + ((c.high + c.low + c.close) / 3) * c.vol, 0);
   const sumV  = data.reduce((s, c) => s + c.vol, 0);
@@ -473,9 +489,12 @@ export function calcVWAP(candles: Candle[]): number {
 }
 
 export function calcSMA(closes: number[], period: number): number {
-  if (closes.length < period) return closes[closes.length - 1] ?? 0;
-  const slice = closes.slice(-period);
-  return slice.reduce((a, b) => a + b, 0) / period;
+  if (closes.length === 0) return 0;
+  // Insufficient history (e.g. just after session open): average whatever's
+  // available instead of returning a single price — a 1-bar "SMA" makes
+  // sma20 > sma50 trend comparisons meaningless.
+  const slice = closes.length < period ? closes : closes.slice(-period);
+  return slice.reduce((a, b) => a + b, 0) / slice.length;
 }
 
 export function calcATR(candles: Candle[], period = 14): number {
