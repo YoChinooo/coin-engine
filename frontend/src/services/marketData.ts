@@ -697,6 +697,8 @@ export interface Indicators {
   ema9CrossUp: boolean;   // EMA9 just crossed ABOVE EMA21
   ema9CrossDown: boolean; // EMA9 just crossed BELOW EMA21
   trend: "BULLISH" | "BEARISH" | "NEUTRAL";
+  establishedTrend: "UP" | "DOWN" | "FLAT"; // SMA20/50 + price structure, independent of short-term oscillators
+  counterTrendRisk: boolean; // true = a bullish oversold/bearish overbought reading is fighting a strong (ADX>25) opposing trend
   techScore: number;      // 0-100
   volScore: number;       // 0-100
   momentumScore: number;  // 0-100 — pure momentum from RSI+MACD+Stoch+ROC
@@ -741,18 +743,44 @@ export function computeIndicators(candles: Candle[]): Indicators {
   const aboveEma9  = last > ema9;
   const aboveEma21 = last > ema21;
 
+  // ── Trend filter — is there an established, strong trend? ────────────────
+  // RSI/BB/Stoch "oversold = bullish" logic assumes a range-bound market where
+  // price mean-reverts. In a STRONG existing downtrend, price can stay oversold
+  // for a long time while making new lows — the classic "falling knife" that
+  // fires a confident LONG right before the move keeps crashing through stop
+  // loss. Use SMA20/50 + price structure (independent of the oscillators being
+  // scored) to detect this, and dampen the contrarian bullish/bearish push
+  // unless real divergence confirms an actual reversal is underway.
+  const establishedTrend: "UP" | "DOWN" | "FLAT" =
+    sma20 > sma50 && last > sma50 ? "UP" :
+    sma20 < sma50 && last < sma50 ? "DOWN" : "FLAT";
+  const strongTrend = adx > 25;
+  const fightingDowntrend = strongTrend && establishedTrend === "DOWN" && divergence !== "BULLISH_DIV";
+  const fightingUptrend   = strongTrend && establishedTrend === "UP"   && divergence !== "BEARISH_DIV";
+  const counterTrendRisk = fightingDowntrend || fightingUptrend;
+  // Keep only 35% of a contrarian score's push away from neutral when it fights the trend
+  const dampenVsTrend = (score: number): number => {
+    if (score > 50 && fightingDowntrend) return 50 + (score - 50) * 0.35;
+    if (score < 50 && fightingUptrend)   return 50 - (50 - score) * 0.35;
+    return score;
+  };
+
   // ── Technical score — weighted from ALL real signals ─────────────────────
-  // RSI: oversold = bullish, overbought = bearish
-  const rsiScore = rsi < 25 ? 80 : rsi < 35 ? 70 : rsi < 45 ? 58 :
-                   rsi < 55 ? 50 : rsi < 65 ? 42 : rsi < 75 ? 30 : 20;
+  // RSI: oversold = bullish, overbought = bearish (dampened if fighting a strong trend)
+  const rsiScore = dampenVsTrend(
+    rsi < 25 ? 80 : rsi < 35 ? 70 : rsi < 45 ? 58 :
+    rsi < 55 ? 50 : rsi < 65 ? 42 : rsi < 75 ? 30 : 20,
+  );
   // MACD: histogram direction + magnitude vs price
   const macdNorm  = last > 0 ? (macd.histogram / last) * 1000 : 0;
   const macdScore = macd.histogram > 0
     ? Math.min(85, 60 + macdNorm * 15)
     : Math.max(15, 40 + macdNorm * 15);
-  // BB: lower band = mean-reversion long, upper = overbought/breakout
-  const bbScore = bb.pct < 0.1 ? 78 : bb.pct < 0.25 ? 68 : bb.pct < 0.4 ? 58 :
-                  bb.pct < 0.6 ? 50 : bb.pct < 0.75 ? 42 : bb.pct < 0.9 ? 32 : 22;
+  // BB: lower band = mean-reversion long, upper = overbought/breakout (dampened vs trend)
+  const bbScore = dampenVsTrend(
+    bb.pct < 0.1 ? 78 : bb.pct < 0.25 ? 68 : bb.pct < 0.4 ? 58 :
+    bb.pct < 0.6 ? 50 : bb.pct < 0.75 ? 42 : bb.pct < 0.9 ? 32 : 22,
+  );
   // VWAP: above = institutional buyers active
   const vwapScore = aboveVwap ? 65 : 35;
   // SMA alignment: EMA9 > EMA21 > SMA50 = ideal bull stack
@@ -761,9 +789,11 @@ export function computeIndicators(candles: Candle[]): Indicators {
                    sma20 > sma50 ? 55 :
                    ema9 < ema21 && ema21 < sma50 ? 25 :
                    ema9 < ema21 ? 38 : 45;
-  // Stochastic
-  const stochScore = stoch.k < 20 ? 72 : stoch.k < 35 ? 62 :
-                     stoch.k < 65 ? 50 : stoch.k < 80 ? 38 : 28;
+  // Stochastic (dampened vs trend — same falling-knife risk as RSI)
+  const stochScore = dampenVsTrend(
+    stoch.k < 20 ? 72 : stoch.k < 35 ? 62 :
+    stoch.k < 65 ? 50 : stoch.k < 80 ? 38 : 28,
+  );
 
   const techScore = Math.round(
     rsiScore   * 0.22 +
@@ -776,8 +806,11 @@ export function computeIndicators(candles: Candle[]): Indicators {
 
   // ── Momentum score — pure directional push ────────────────────────────────
   let momentumPts = 50;
-  // RSI
-  momentumPts += rsi < 35 ? +14 : rsi > 65 ? -14 : (50 - rsi) * 0.5;
+  // RSI (dampened vs trend — don't reward buying an oversold reading in a falling knife)
+  const rsiMomentum = rsi < 35 ? +14 : rsi > 65 ? -14 : (50 - rsi) * 0.5;
+  momentumPts += fightingDowntrend && rsiMomentum > 0 ? rsiMomentum * 0.35
+               : fightingUptrend   && rsiMomentum < 0 ? rsiMomentum * 0.35
+               : rsiMomentum;
   // MACD histogram direction + cross
   momentumPts += macd.histogram > 0 ? +12 : -12;
   momentumPts += macd.macd > macd.signal ? +5 : -5;
@@ -826,6 +859,7 @@ export function computeIndicators(candles: Candle[]): Indicators {
     ema9, ema21, stoch, adx, roc10, buyPressure, divergence,
     aboveVwap, aboveEma9, aboveEma21, ema9CrossUp, ema9CrossDown,
     trend, keyLevels, avgVolume20, volumeRatio,
+    establishedTrend, counterTrendRisk,
     techScore:      Math.max(5, Math.min(95, techScore)),
     volScore:       Math.max(5, Math.min(95, volScore)),
     momentumScore:  Math.max(5, Math.min(95, momentumScore)),

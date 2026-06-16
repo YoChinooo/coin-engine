@@ -103,19 +103,29 @@ function calcWinProb(compositeScore: number, indicators: Indicators, dir: Direct
     rsi, macd, bb, aboveVwap, sma20, sma50,
     ema9, ema21, stoch, adx, roc10, buyPressure,
     divergence, ema9CrossUp, ema9CrossDown, volumeRatio,
+    establishedTrend,
   } = indicators;
+
+  // Is this call a mean-reversion bet fighting a strong, established opposing
+  // trend? (the "falling/rising knife" — RSI/Stoch/BB oversold-bullish or
+  // overbought-bearish readings are unreliable when ADX confirms a strong
+  // trend actively running the other way, with no real divergence reversal)
+  const fightingTrend       = (isLong && establishedTrend === "DOWN") || (!isLong && establishedTrend === "UP");
+  const realReversal        = (isLong && divergence === "BULLISH_DIV") || (!isLong && divergence === "BEARISH_DIV");
+  const strongOpposingTrend = fightingTrend && adx > 25 && !realReversal;
+  const dampen = (v: number) => strongOpposingTrend ? v * 0.35 : v;
 
   let pts = 0;
 
-  // RSI position (8 pts)
-  pts += isLong ? (rsi < 30 ? 8 : rsi < 45 ? 5 : rsi > 70 ? -6 : rsi > 60 ? -2 : 1)
-                : (rsi > 70 ? 8 : rsi > 55 ? 5 : rsi < 30 ? -6 : rsi < 40 ? -2 : 1);
-  // MACD (10 pts)
+  // RSI position (8 pts) — dampened if fighting a strong opposing trend
+  pts += dampen(isLong ? (rsi < 30 ? 8 : rsi < 45 ? 5 : rsi > 70 ? -6 : rsi > 60 ? -2 : 1)
+                       : (rsi > 70 ? 8 : rsi > 55 ? 5 : rsi < 30 ? -6 : rsi < 40 ? -2 : 1));
+  // MACD (10 pts) — trend-following already, no dampening needed
   pts += isLong ? (macd.histogram > 0 ? 7 : -6) : (macd.histogram < 0 ? 7 : -6);
   pts += isLong ? (macd.macd > macd.signal ? 3 : -2) : (macd.macd < macd.signal ? 3 : -2);
-  // Stochastic (7 pts)
-  pts += isLong ? (stoch.k < 25 ? 7 : stoch.k < 50 && stoch.k > stoch.d ? 3 : stoch.k > 80 ? -5 : 0)
-                : (stoch.k > 75 ? 7 : stoch.k > 50 && stoch.k < stoch.d ? 3 : stoch.k < 20 ? -5 : 0);
+  // Stochastic (7 pts) — dampened, same falling-knife risk as RSI
+  pts += dampen(isLong ? (stoch.k < 25 ? 7 : stoch.k < 50 && stoch.k > stoch.d ? 3 : stoch.k > 80 ? -5 : 0)
+                       : (stoch.k > 75 ? 7 : stoch.k > 50 && stoch.k < stoch.d ? 3 : stoch.k < 20 ? -5 : 0));
   // EMA cross — strongest signal (10 pts)
   if (isLong  && ema9CrossUp)   pts += 10;
   if (!isLong && ema9CrossDown) pts += 10;
@@ -128,10 +138,13 @@ function calcWinProb(compositeScore: number, indicators: Indicators, dir: Direct
   pts += isLong ? (aboveVwap ? 5 : -4) : (!aboveVwap ? 5 : -4);
   // SMA alignment (3 pts)
   pts += isLong ? (sma20 > sma50 ? 3 : -2) : (sma20 < sma50 ? 3 : -2);
-  // BB position (4 pts)
-  pts += isLong ? (bb.pct < 0.2 ? 4 : bb.pct > 0.85 ? -3 : 0) : (bb.pct > 0.8 ? 4 : bb.pct < 0.15 ? -3 : 0);
-  // ADX boost: trending market makes signals more reliable
-  if (adx > 30) pts = Math.round(pts * 1.15);
+  // BB position (4 pts) — dampened, mean-reversion signal
+  pts += dampen(isLong ? (bb.pct < 0.2 ? 4 : bb.pct > 0.85 ? -3 : 0) : (bb.pct > 0.8 ? 4 : bb.pct < 0.15 ? -3 : 0));
+  // ADX: amplifies conviction ONLY when trend-aligned; penalizes counter-trend bets.
+  // Previously this amplified pts unconditionally — meaning a strong trend made a
+  // WRONG counter-trend call look even MORE confident, exactly backwards.
+  if (strongOpposingTrend) pts = Math.round(pts * 0.8);
+  else if (adx > 30)       pts = Math.round(pts * 1.15);
   // ROC confirms
   pts += isLong ? (roc10 > 2 ? 3 : roc10 < -2 ? -3 : 0) : (roc10 < -2 ? 3 : roc10 > 2 ? -3 : 0);
   // Buy pressure
@@ -203,7 +216,7 @@ function buildSetup(price: number, direction: Direction, assetType: AssetType,
   // ── ATR-based stop loss ────────────────────────────────────────────────────
   // 1.5× ATR for equity futures (was 1.2× — too tight, stopped out on noise)
   // 1.8× for crypto (high overnight volatility), 1.4× for stocks
-  const { rsi, macd, bb, vwap, aboveVwap, sma20, sma50, atr, keyLevels } = indicators;
+  const { rsi, macd, bb, vwap, aboveVwap, sma20, sma50, atr, keyLevels, adx, establishedTrend, counterTrendRisk } = indicators;
   const atrMultiplier = assetType === "futures" ? 1.5 : assetType === "crypto" ? 1.8 : 1.4;
   const atrStop = atr * atrMultiplier;
 
@@ -300,6 +313,14 @@ function buildSetup(price: number, direction: Direction, assetType: AssetType,
 
   // ── Warnings ──────────────────────────────────────────────────────────────
   const warnings: string[] = [];
+  // Falling-knife / rising-knife: this direction is a mean-reversion call fighting
+  // a strong (ADX>25) established trend with no real divergence confirming reversal.
+  if (counterTrendRisk && isLong && establishedTrend === "DOWN") {
+    warnings.push(`🔴 COUNTER-TREND LONG — ADX ${adx.toFixed(0)} confirms a strong downtrend still in force. This is a bounce bet against the trend, not a confirmed reversal — high risk of the trend resuming straight through your stop. Consider skipping or waiting for confirmed reversal (divergence + volume).`);
+  }
+  if (counterTrendRisk && !isLong && establishedTrend === "UP") {
+    warnings.push(`🔴 COUNTER-TREND SHORT — ADX ${adx.toFixed(0)} confirms a strong uptrend still in force. This is a fade bet against the trend, not a confirmed reversal — high risk of the trend resuming straight through your stop. Consider skipping or waiting for confirmed reversal (divergence + volume).`);
+  }
   if (conviction === "LOW") warnings.push("⚠️ Low conviction — reduce position size by 50%");
   if (isLong && rsi > 75) warnings.push(`⚠️ RSI ${rsi.toFixed(0)} — overbought, risk of pullback before continuation`);
   if (!isLong && rsi < 25) warnings.push(`⚠️ RSI ${rsi.toFixed(0)} — oversold, risk of bounce before continuation`);
@@ -356,6 +377,7 @@ async function buildAnalysis(
     ema9, ema21, stoch, adx, roc10, buyPressure, divergence,
     aboveEma9, aboveEma21, ema9CrossUp, ema9CrossDown,
     atr, keyLevels, volumeRatio, avgVolume20,
+    establishedTrend, counterTrendRisk,
     techScore: rawTech, volScore: rawVol,
     momentumScore: rawMomentum, structureScore: rawStructure,
   } = indicators;
@@ -399,6 +421,7 @@ async function buildAnalysis(
     : null;
   const structureFindings = [
     `Structure Score: ${structureScore}/100 (ADX: ${adx.toFixed(0)} — ${adx > 25 ? "trending market" : "range-bound market"})`,
+    `Established trend (SMA20/50 + price): ${establishedTrend} ${counterTrendRisk ? "🔴 current direction is fighting this trend — oversold/overbought scores were dampened" : "— direction agrees with trend"}`,
     `Price vs VWAP: ${aboveVwap ? "✅ above" : "⚠ below"} · vs EMA9: ${aboveEma9 ? "✅ above" : "⚠ below"} · vs EMA21: ${aboveEma21 ? "✅ above" : "⚠ below"}`,
     `EMA Stack: ${ema9 > ema21 && ema21 > sma50 ? "✅ BULLISH STACK (EMA9 > EMA21 > SMA50) — ideal long setup" : ema9 < ema21 && ema21 < sma50 ? "❌ BEARISH STACK (EMA9 < EMA21 < SMA50) — ideal short setup" : "Mixed — partial alignment"}`,
     `Buy pressure (20-bar vol-weighted): ${buyPressure.toFixed(0)}% ${buyPressure > 60 ? "✅ buyers dominant" : buyPressure < 40 ? "⚠ sellers dominant" : "balanced"}`,
